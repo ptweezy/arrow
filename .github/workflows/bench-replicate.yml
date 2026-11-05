@@ -1,0 +1,132 @@
+name: bench-eval-replicate
+
+# Benchmarks Eval.replicate before and after arrow-kt/arrow#4003 on GitHub-hosted runners.
+on:
+  push:
+    branches: [bench/eval-replicate]
+  workflow_dispatch:
+    inputs:
+      before:
+        description: arrow commit for "before"
+        default: e2a31808c4d4173ed7fdcc84acfae1ffd1505761
+      after:
+        description: arrow commit for "after"
+        default: d6e109c743cb3ab1e168a8700600eef240df4d5d
+
+env:
+  BEFORE_SHA: ${{ inputs.before || 'e2a31808c4d4173ed7fdcc84acfae1ffd1505761' }}
+  AFTER_SHA: ${{ inputs.after || 'd6e109c743cb3ab1e168a8700600eef240df4d5d' }}
+  GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.kotlin.dsl.internal.io.timeout=120000 -Dorg.gradle.jvmargs="-Xmx5g -XX:+UseParallelGC -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        variant: [before, after]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: bench
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ matrix.variant == 'before' && env.BEFORE_SHA || env.AFTER_SHA }}
+          path: arrow
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Build arrow-eval and its runtime classpath
+        working-directory: arrow
+        run: ./gradlew --init-script ../bench/bench/bench-classpath.init.gradle :arrow-eval:benchClasspath
+
+      - name: Compile the harness
+        run: |
+          cp=arrow/arrow-libs/core/arrow-eval/build/bench-classpath
+          javac --release 17 -cp "$cp/*" -d harness bench/bench/ReplicateBench.java
+          jar --create --file "$cp/replicate-bench.jar" -C harness .
+          git -C arrow log -1 --format='%H %s' > "$cp/COMMIT.txt"
+          cat "$cp/COMMIT.txt"
+          ls -la "$cp"
+          sed -n '/fun <A> Eval<A>.replicate(n: Int)/,/^$/p' arrow/arrow-libs/core/arrow-eval/src/commonMain/kotlin/arrow/eval/Eval.kt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jars-${{ matrix.variant }}
+          path: arrow/arrow-libs/core/arrow-eval/build/bench-classpath/
+          retention-days: 14
+
+  bench:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+        java: [17, 21, 25]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: bench
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: jars-*
+          path: jars
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: Benchmark
+        env:
+          BENCH_RUNNER: ${{ matrix.os }}
+        run: |
+          java -version
+          bash bench/bench/run.sh "results-${{ matrix.os }}-jdk${{ matrix.java }}.jsonl"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-${{ matrix.os }}-jdk${{ matrix.java }}
+          path: results-*
+          retention-days: 30
+
+  summary:
+    needs: bench
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: bench
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: results-*
+          path: results
+
+      - name: Summarize
+        run: |
+          python3 bench/bench/summarize.py results | tee summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: summary
+          path: summary.md

@@ -1,0 +1,14 @@
+// Adds :arrow-eval:benchClasspath, which copies the arrow-eval JVM jar and its
+// runtime classpath (arrow-core, kotlin-stdlib, ...) into one directory, so the
+// benchmark can run with plain `java -cp "dir/*"`.
+allprojects {
+  if (path == ':arrow-eval') {
+    afterEvaluate { p ->
+      p.tasks.register('benchClasspath', Copy) {
+        from p.tasks.named('jvmJar')
+        from p.configurations.named('jvmRuntimeClasspath')
+        into p.layout.buildDirectory.dir('bench-classpath')
+      }
+    }
+  }
+}
